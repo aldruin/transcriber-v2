@@ -50,7 +50,7 @@ Esta é a parte mais poderosa:
 ## 🏗️ Para Desenvolvedores
 
 ### Instalação
-1. Clone o repositório: `git clone https://github.com/seu-usuario/transcriber-v2.git`
+1. Clone o repositório: `git clone https://github.com/aldruin/transcriber-v2.git`
 2. Instale as dependências: `pip install -r requirements.txt`
 3. Execute: `python main.py`
 
