@@ -43,7 +43,10 @@ def patch_soundcard_numpy2() -> None:
         # sep == "" → modo binário (o que o soundcard usa). Modo texto (sep != "")
         # ainda existe e é delegado ao original.
         if sep == "":
-            arr = np.frombuffer(buffer, dtype=dtype)
+            # .copy() é essencial: o soundcard recicla o buffer logo depois
+            # (_capture_release), então uma view corromperia o áudio (fica
+            # "robótico"). O np.fromstring original também copiava.
+            arr = np.frombuffer(buffer, dtype=dtype).copy()
             return arr if count < 0 else arr[:count]
         return _orig_fromstring(buffer, dtype=dtype, count=count, sep=sep)
 
@@ -65,7 +68,7 @@ def ensure_com_initialized() -> None:
     # RPC_E_CHANGED_MODE(0x80010106, outra thread pediu modo diferente).
     try:
         ctypes.windll.ole32.CoInitializeEx(None, 0x2)
-    except Exception as exc:  # pragma: no cover - depende do host
+    except Exception as exc:
         print(f"[win_compat] CoInitializeEx falhou: {exc}", flush=True)
 
 
@@ -77,5 +80,5 @@ def com_uninitialize() -> None:
 
     try:
         ctypes.windll.ole32.CoUninitialize()
-    except Exception:  # pragma: no cover
+    except Exception:
         pass
