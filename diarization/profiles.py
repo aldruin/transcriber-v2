@@ -275,6 +275,29 @@ class ProfileManager:
         self._session_profiles = {}
         self._speaker_counter   = 0
 
+    # ── Perfil "Eu" (canal microfone) ─────────────────────────────────────────
+
+    def update_user_profile(self, name: str, embedding: np.ndarray) -> str:
+        """
+        Atualiza ou cria o perfil do usuário com o embedding do canal microfone (M3).
+
+        Se o perfil ainda não existe, cria. Se existe, refina com média
+        ponderada (90% histórico, 10% nova observação) para suavizar drift.
+        """
+        existing = self._find_by_name(name)
+        if existing is None:
+            self.save_profile(name, embedding)
+            return name
+
+        avg = 0.9 * existing.embedding + 0.1 * embedding
+        norm = np.linalg.norm(avg)
+        if norm > 1e-8:
+            avg = avg / norm
+        existing.embedding = avg.astype(np.float32)
+        existing.updated_at = datetime.now().isoformat()
+        self._save()
+        return name
+
     def promote_session_speaker(self, session_label: str, new_name: str) -> bool:
         """
         Promove um falante anônimo da sessão ("Falante_1") a um perfil permanente.
