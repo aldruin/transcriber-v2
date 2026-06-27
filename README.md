@@ -44,6 +44,13 @@ automaticamente** (loopback do que você escuta) — você só escolhe o seu
 rodar scripts. No macOS, instale o [BlackHole](https://github.com/ExistentialAudio/BlackHole)
 (único SO que ainda exige um passo manual).
 
+> [!IMPORTANT]
+> O áudio do sistema é capturado da **saída de áudio padrão** (fones,
+> alto-falantes…) — é dela que o app "ouve" o som. Por isso é preciso ter **um
+> dispositivo de saída ativo**; sem nenhuma saída, não há o que capturar. Você
+> não precisa estar ouvindo, mas o dispositivo precisa estar ligado. Se trocar
+> de saída durante a captura, é só **Parar → Iniciar** para o app redetectar.
+
 ### 2. Durante a Reunião
 - Clique em **▶ Iniciar** para começar a captura.
 - Use o botão **⏸ Pausar** se houver um intervalo ou conversa privada que não deve ser transcrita.
@@ -55,6 +62,20 @@ Esta é a parte mais poderosa:
 - **Clique sobre o nome `[Falante_1]`** na área de texto.
 - Digite o nome real da pessoa (ex: "João").
 - **Pronto!** O sistema agora "conhece" a voz do João. Todas as falas dele nesta reunião e em **todas as próximas** serão identificadas automaticamente como "João".
+
+---
+
+## 🧪 macOS e Linux — ajude a testar
+
+A captura no **Windows** está validada. Em **macOS e Linux** o caminho existe
+(monitor source no Linux, BlackHole no macOS), mas ainda precisa de validação em
+campo. Se você usa um desses sistemas, ajude o projeto a evoluir:
+
+1. Rode `python diagnostico.py` — ele mostra se a captura do áudio do sistema foi
+   detectada e, se falhar, o motivo específico do seu SO.
+2. Deu erro ou ficou estranho? **[Abra uma issue](https://github.com/aldruin/transcriber-v2/issues)**
+   colando o relatório completo do diagnóstico. É isso que nos permite corrigir
+   o suporte multiplataforma.
 
 ---
 
