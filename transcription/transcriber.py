@@ -67,18 +67,16 @@ class Transcriber:
         self.on_result = on_result
         self.on_ready  = on_ready
         self.on_error  = on_error
-        self.diarization = diarization # <-- Adicionado
+        self.diarization = diarization
 
         self._model      : WhisperModel | None = None
         self._queue      : queue.Queue         = queue.Queue()
         self._stop_event : threading.Event     = threading.Event()
         self._worker     : threading.Thread | None = None
 
-        # Acumulação de blocos: o Whisper transcreve MUITO melhor com áudio
-        # contínuo (~10s) do que com frases curtas isoladas — em blocos de 1–4s
-        # o avg_logprob despenca e o filtro anti-alucinação corta quase tudo.
-        # Juntamos os chunks do VAD por canal até ~block_target_sec, ou quando o
-        # canal fica em silêncio por block_idle_sec (a pessoa parou de falar).
+        # O Whisper transcreve bem melhor com áudio contínuo (~10s) do que com
+        # frases curtas isoladas. Juntamos os chunks do VAD por canal até
+        # block_target_sec, ou após block_idle_sec de silêncio (fim da fala).
         self._block_target_sec = 10.0
         self._block_idle_sec   = 1.5
 

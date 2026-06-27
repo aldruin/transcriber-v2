@@ -1,19 +1,8 @@
 """
 transcription/curation.py — Monta o prompt de curadoria para o usuário COPIAR e
-colar no LLM dele (Claude/GPT/etc). Este módulo NÃO chama nenhuma API: ele só
-gera texto. Assim funciona com qualquer provedor e sem precisar de API key.
-
-Princípios do prompt (engenharia de prompt aplicada):
-  • Estrutura clara: Papel → Contexto → Material → Tarefa → Restrições → Saída.
-  • O curador é tratado como PARCEIRO, com brechas explícitas para sinalizar
-    dúvidas em vez de adivinhar.
-  • Intervenção mínima: corrigir apenas alucinações ÓBVIAS do Whisper, sem
-    reescrever estilo nem inventar conteúdo.
-  • Os horários/marcações ficam na ENTRADA (ajudam o LLM a entender a sequência)
-    e são removidos só na SAÍDA final.
-  • Reconciliação de falantes: a diarização automática super-segmenta (a mesma
-    pessoa vira Falante_1, Falante_2...), então pedimos ao LLM que unifique
-    quando o conteúdo deixar claro.
+colar no LLM dele (Claude/GPT/etc). Não chama nenhuma API: só gera texto, então
+funciona com qualquer provedor e sem API key. As diretrizes (intervenção mínima,
+reconciliação de falantes, marcações só na entrada) estão no próprio template.
 """
 
 from __future__ import annotations

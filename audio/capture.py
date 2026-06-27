@@ -235,11 +235,9 @@ class VoiceCapture:
             self._pre_pad.clear()
             return
 
-        # Sanitiza lixo (NaN/Inf/valores absurdos) ANTES de qualquer
-        # processamento. O primeiro buffer do WASAPI loopback às vezes vem com
-        # lixo, e um único NaN CORROMPE permanentemente o estado do silero-VAD
-        # (passa a nunca mais detectar fala → nada é transcrito a sessão toda).
-        # Aqui é o ponto comum aos dois backends, então protege os dois canais.
+        # O 1º buffer do WASAPI às vezes vem com NaN/Inf, e um único NaN corrompe
+        # de vez o estado do silero-VAD (para de detectar fala a sessão inteira).
+        # Sanitiza aqui, que é o ponto comum aos dois canais.
         mono_native = np.nan_to_num(
             np.asarray(mono_native, dtype=np.float32),
             nan=0.0, posinf=0.0, neginf=0.0,

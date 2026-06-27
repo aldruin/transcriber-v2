@@ -44,13 +44,9 @@ VAD_THRESHOLD_MICROFONE = 0.00038
 TARGET_SR = 16_000   # sample rate esperado pelo Whisper (não altere)
 
 # ── Diarização ────────────────────────────────────────────────────────────────
-# Similaridade mínima (cosine) para considerar dois chunks como o MESMO falante.
-# Calibrado empiricamente (resemblyzer/GE2E em trechos curtos de fala): a MESMA
-# pessoa fica tipicamente em 0.60–0.94 e pessoas DIFERENTES abaixo de ~0.50.
-# O valor antigo (0.75) cortava no meio da faixa da própria pessoa e
-# super-segmentava (1 voz virava 2–4 "Falante_N"). 0.60 fica no "vale" entre as
-# duas distribuições; a reconciliação fina de falantes pode ser delegada ao LLM
-# de curadoria. Reajuste com áudio real via tools/calibrar_diarizacao.py.
+# Similaridade mínima (cosine) para dois trechos serem o MESMO falante. Calibrado
+# empiricamente: a mesma pessoa fica em ~0.60–0.94, pessoas diferentes abaixo de
+# ~0.50; 0.75 (antigo) super-segmentava. Reajuste via tools/calibrar_diarizacao.py.
 DIARIZATION_SIMILARITY_THRESHOLD = 0.60
 # Número máximo de falantes distintos esperados por sessão
 DIARIZATION_MAX_SPEAKERS = 8
