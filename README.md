@@ -132,3 +132,6 @@ Distribuído sob a licença MIT. Veja `LICENSE` para mais informações.
 <p align="center">
   Desenvolvido com ❤️ para a comunidade de produtividade.
 </p>
+
+
+<img width="996" height="763" alt="image" src="https://github.com/user-attachments/assets/413d7d7e-75a8-4377-b5f5-e358e749846d" />
