@@ -1,0 +1,177 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  smoke-test:
+    name: Smoke test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: System deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libportaudio2 libpulse-dev
+
+      - name: System deps (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install portaudio
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Valida que TODAS as libs nativas importam neste SO (não inclui a UI,
+      # que precisa de display). Pega problemas de dependência por plataforma
+      # sem precisar de áudio real.
+      - name: Import smoke test
+        run: python -c "import sounddevice, soundcard, torch, faster_whisper, silero_vad, resemblyzer; import config, settings, audio.capture, audio.loopback, audio.win_loopback_compat, transcription.transcriber, transcription.curation, diarization; print('imports OK')"
+
+      # Relatório de ambiente/áudio do runner (loopback vai falhar em CI
+      # headless — esperado; o importante é não quebrar e logar o motivo).
+      - name: Diagnostico de ambiente
+        run: python diagnostico.py
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: smoke-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: MeetingTranscriberV2-windows.exe
+          - os: ubuntu-latest
+            artifact: MeetingTranscriberV2-linux.AppImage
+          - os: macos-latest
+            artifact: MeetingTranscriberV2-macos.dmg
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: System deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libportaudio2 libpulse-dev libfuse2 wget
+
+      - name: System deps (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install portaudio
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller --noconfirm app.spec
+
+      - name: Package — Windows
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: mv dist/MeetingTranscriberV2.exe ${{ matrix.artifact }}
+
+      - name: Package — Linux AppImage
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          mkdir -p AppDir/usr/bin
+          cp dist/MeetingTranscriberV2 AppDir/usr/bin/
+
+          cat > AppDir/AppRun <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          exec "$HERE/usr/bin/MeetingTranscriberV2" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+
+          cat > AppDir/MeetingTranscriberV2.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Meeting Transcriber
+          Exec=MeetingTranscriberV2
+          Icon=MeetingTranscriberV2
+          Categories=AudioVideo;Audio;
+          EOF
+
+          # Ícone placeholder 1x1 PNG (substituir quando houver arte oficial)
+          printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe\x02\xfe\xa3v\xfe\x07\x00\x00\x00\x00IEND\xaeB`\x82' > AppDir/MeetingTranscriberV2.png
+
+          wget -qO appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir ${{ matrix.artifact }}
+
+      - name: Package — macOS DMG
+        if: matrix.os == 'macos-latest'
+        run: |
+          APP=MeetingTranscriber.app
+          mkdir -p $APP/Contents/MacOS
+          cp dist/MeetingTranscriberV2 $APP/Contents/MacOS/
+
+          cat > $APP/Contents/Info.plist <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key><string>MeetingTranscriberV2</string>
+            <key>CFBundleIdentifier</key><string>com.aldruin.meetingtranscriber</string>
+            <key>CFBundleName</key><string>Meeting Transcriber</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>2.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+
+          hdiutil create -volname "Meeting Transcriber" \
+            -srcfolder $APP -ov -format UDZO ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          ls -lh release/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

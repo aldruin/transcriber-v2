@@ -1,139 +1,141 @@
 """
-diagnostico.py — Ferramenta de diagnóstico do Meeting Transcriber v2.
+diagnostico.py — Diagnostico do Meeting Transcriber v2.
 
-Roda ANTES do main.py para:
-1. Listar todos os dispositivos de áudio disponíveis
-2. Medir o RMS real de cada dispositivo configurado por 5 segundos
-3. Sugerir os thresholds corretos para o config.py
+Coleta informacoes do ambiente e da captura de audio e imprime um relatorio
+que voce pode COPIAR e COLAR ao reportar um problema (util especialmente em
+Linux/macOS, onde nao temos como testar tudo). Nao e interativo e nao altera
+nada no sistema.
 
 Uso:
     python diagnostico.py
 """
 
 import sys
-import time
+import platform
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import numpy as np
-import sounddevice as sd
 
-# ── Configuração (espelha o config.py) ───────────────────────────────────────
-DEVICE_SISTEMA   = 7
-DEVICE_MICROFONE = 16
-MEASURE_SECONDS  = 5
-# ─────────────────────────────────────────────────────────────────────────────
+def secao(titulo: str) -> None:
+    print("\n" + "=" * 72)
+    print(f"  {titulo}")
+    print("=" * 72)
 
 
-def listar_dispositivos():
-    print("\n" + "=" * 70)
-    print("  DISPOSITIVOS DE ÁUDIO DISPONÍVEIS")
-    print("=" * 70)
-    devices = sd.query_devices()
+def diag_ambiente() -> None:
+    secao("AMBIENTE")
+    print(f"  SO:     {platform.platform()}")
+    print(f"  Python: {sys.version.split()[0]} ({platform.machine()})")
+
+
+def diag_bibliotecas() -> None:
+    import importlib.metadata as md
+    secao("BIBLIOTECAS")
+    mods = [
+        "numpy", "sounddevice", "soundcard", "torch", "torchaudio",
+        "faster_whisper", "silero_vad", "resemblyzer", "customtkinter",
+    ]
+    # Nome do pacote (pip) quando difere do nome do módulo.
+    pkg_alias = {"silero_vad": "silero-vad", "faster_whisper": "faster-whisper"}
+    for mod in mods:
+        try:
+            __import__(mod)
+        except Exception as exc:
+            print(f"  {mod:16s} NAO INSTALADO ({type(exc).__name__})")
+            continue
+        ver = getattr(sys.modules[mod], "__version__", None)
+        if not ver:
+            for pkg in (pkg_alias.get(mod, mod), mod, mod.replace("_", "-")):
+                try:
+                    ver = md.version(pkg)
+                    break
+                except Exception:
+                    continue
+        print(f"  {mod:16s} {ver or '(instalado, versao ?)'}")
+
+
+def diag_gpu() -> None:
+    secao("GPU / CUDA (velocidade da transcricao)")
+    try:
+        import torch
+        print(f"  torch build:      {torch.__version__}")
+        disponivel = torch.cuda.is_available()
+        print(f"  CUDA disponivel:  {disponivel}")
+        if disponivel:
+            print(f"  GPU:              {torch.cuda.get_device_name(0)}")
+            print("  -> O Whisper vai usar a GPU (rapido).")
+        else:
+            cpu_only = "+cpu" in torch.__version__
+            if cpu_only:
+                print("  -> torch e CPU-only. Mesmo com GPU NVIDIA, roda na CPU (lento).")
+            else:
+                print("  -> CUDA indisponivel (driver NVIDIA ausente/desatualizado?).")
+            print("     Para usar a GPU, instale o torch com CUDA. Ver README (GPU).")
+    except Exception as exc:
+        print(f"  erro: {exc}")
+
+
+def diag_dispositivos() -> None:
+    secao("DISPOSITIVOS DE AUDIO")
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+    except Exception as exc:
+        print(f"  Erro ao consultar dispositivos: {exc}")
+        return
+
+    print("  -- Entradas (microfones) --")
     for i, dev in enumerate(devices):
         if dev["max_input_channels"] > 0:
-            marker = ""
-            if i == DEVICE_SISTEMA:
-                marker = "  ← DEVICE_SISTEMA (config)"
-            elif i == DEVICE_MICROFONE:
-                marker = "  ← DEVICE_MICROFONE (config)"
-            print(
-                f"  [{i:2d}] {dev['name'][:50]:<50} "
-                f"in={dev['max_input_channels']} "
-                f"sr={int(dev['default_samplerate'])}Hz"
-                f"{marker}"
-            )
-    print()
+            print(f"  [{i:2d}] {dev['name'][:48]:<48} "
+                  f"{dev['max_input_channels']}ch {int(dev['default_samplerate'])}Hz")
+
+    print("  -- Saidas (fonte do loopback do sistema) --")
+    for i, dev in enumerate(devices):
+        if dev["max_output_channels"] > 0:
+            print(f"  [{i:2d}] {dev['name'][:48]:<48} {dev['max_output_channels']}ch")
 
 
-def medir_rms(device_idx: int, label: str, segundos: int = MEASURE_SECONDS):
-    print(f"  Medindo '{label}' (dispositivo {device_idx}) por {segundos}s...")
-    print(f"  {'Fale/reproduza áudio agora':^50}")
-    print(f"  {'─' * 50}")
-
-    dev        = sd.query_devices(device_idx)
-    channels   = dev["max_input_channels"]
-    sr         = int(dev["default_samplerate"])
-    hop        = int(sr * 0.05)   # 50ms
-    amostras   = []
-    rms_values = []
-
-    def callback(indata, frames, t, status):
-        if status:
-            print(f"    [AVISO] {status}")
-        mono = indata.mean(axis=1) if indata.shape[1] > 1 else indata[:, 0]
-        rms  = float(np.sqrt(np.mean(mono ** 2)))
-        rms_values.append(rms)
-
-        # Barra visual em tempo real
-        bar_len = int(min(rms / 0.05, 1.0) * 40)
-        bar     = "█" * bar_len + "░" * (40 - bar_len)
-        print(f"\r  RMS: {rms:.5f}  |{bar}|", end="", flush=True)
+def diag_loopback() -> None:
+    secao("CAPTURA DO AUDIO DO SISTEMA (LOOPBACK)")
+    try:
+        from audio import loopback
+    except Exception as exc:
+        print(f"  Erro ao importar o modulo de loopback: {exc}")
+        return
 
     try:
-        with sd.InputStream(
-            device=device_idx,
-            channels=channels,
-            samplerate=sr,
-            callback=callback,
-            blocksize=hop,
-        ):
-            time.sleep(segundos)
+        cfg = loopback.detect_system_audio()
+        print(f"  OK: {cfg.label}")
+        print(f"      metodo={cfg.method}  canais={cfg.channels}  sr={cfg.samplerate}")
+        print("  -> O audio do sistema sera capturado automaticamente.")
+    except loopback.LoopbackError as exc:
+        print(f"  FALHOU: {exc}")
+        so = platform.system()
+        if so == "Darwin":
+            print("  -> macOS exige um dispositivo virtual. Instale o BlackHole:")
+            print("       brew install blackhole-2ch")
+            print("     e crie um Aggregate Device. Ver SETUP-GUIDE.md.")
+        elif so == "Linux":
+            print("  -> Linux: confirme que PulseAudio/PipeWire esta ativo e que")
+            print("     existe um '.monitor'. Rode: pactl list short sources")
+        else:
+            print("  -> Conecte/ative uma saida de audio padrao e tente de novo.")
     except Exception as exc:
-        print(f"\n  [ERRO] Não foi possível abrir o dispositivo: {exc}")
-        return None
-
-    print()  # nova linha após barra
-
-    if not rms_values:
-        print("  [ERRO] Nenhum dado capturado.")
-        return None
-
-    rms_arr  = np.array(rms_values)
-    rms_min  = float(rms_arr.min())
-    rms_max  = float(rms_arr.max())
-    rms_med  = float(np.median(rms_arr))
-    rms_p10  = float(np.percentile(rms_arr, 10))   # ruído de fundo (silêncio)
-    rms_p75  = float(np.percentile(rms_arr, 75))   # fala típica
-
-    # Threshold sugerido: um pouco acima do ruído de fundo
-    sugestao = round(rms_p10 * 2.5, 5)
-
-    print(f"  Mínimo:   {rms_min:.5f}")
-    print(f"  Máximo:   {rms_max:.5f}")
-    print(f"  Mediana:  {rms_med:.5f}")
-    print(f"  P10 (silêncio): {rms_p10:.5f}")
-    print(f"  P75 (fala):     {rms_p75:.5f}")
-    print()
-    print(f"  ✅ Threshold sugerido para config.py: {sugestao:.5f}")
-    print()
-
-    return sugestao
+        print(f"  Erro inesperado: {exc}")
 
 
-def main():
-    print("\n🔍 Meeting Transcriber v2 — Diagnóstico de Áudio")
-
-    listar_dispositivos()
-
-    print("=" * 70)
-    print("  MEDIÇÃO DE NÍVEL — SISTEMA")
-    print("=" * 70)
-    thresh_sis = medir_rms(DEVICE_SISTEMA, "Sistema")
-
-    print("=" * 70)
-    print("  MEDIÇÃO DE NÍVEL — MICROFONE (fale normalmente)")
-    print("=" * 70)
-    thresh_mic = medir_rms(DEVICE_MICROFONE, "Microfone")
-
-    print("=" * 70)
-    print("  RESUMO — copie os valores abaixo para o config.py")
-    print("=" * 70)
-    if thresh_sis is not None:
-        print(f"  VAD_THRESHOLD_SISTEMA   = {thresh_sis}")
-    if thresh_mic is not None:
-        print(f"  VAD_THRESHOLD_MICROFONE = {thresh_mic}")
+def main() -> None:
+    print("\nMEETING TRANSCRIBER V2 - DIAGNOSTICO")
+    print("(copie todo o relatorio abaixo ao reportar um problema)")
+    diag_ambiente()
+    diag_bibliotecas()
+    diag_gpu()
+    diag_dispositivos()
+    diag_loopback()
+    secao("FIM")
+    print("  Reporte em: https://github.com/aldruin/transcriber-v2/issues")
     print()
 
 

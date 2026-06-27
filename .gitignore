@@ -30,6 +30,8 @@ MANIFEST
 # PyInstaller
 *.manifest
 *.spec
+# app.spec e necessario para o build multiplataforma (CI) — nao ignorar
+!app.spec
 
 # Unit test / coverage reports
 htmlcov/
@@ -54,13 +56,14 @@ ENV/
 env.bak/
 venv.bak/
 
-# IDE
+# IDE / Ferramentas
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 .DS_Store
+.claude/
 
 # OS
 Thumbs.db
