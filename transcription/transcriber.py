@@ -11,9 +11,9 @@ A transcrição roda em thread separada, consumindo de uma fila,
 para não bloquear a captura de áudio.
 """
 
+import time
 import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from faster_whisper import WhisperModel
 
@@ -22,6 +22,7 @@ from diarization import DiarizationEngine
 from config import (
     NO_SPEECH_THRESHOLD,
     AVG_LOGPROB_THRESHOLD,
+    TARGET_SR,
 )
 import settings
 
@@ -72,6 +73,14 @@ class Transcriber:
         self._queue      : queue.Queue         = queue.Queue()
         self._stop_event : threading.Event     = threading.Event()
         self._worker     : threading.Thread | None = None
+
+        # Acumulação de blocos: o Whisper transcreve MUITO melhor com áudio
+        # contínuo (~10s) do que com frases curtas isoladas — em blocos de 1–4s
+        # o avg_logprob despenca e o filtro anti-alucinação corta quase tudo.
+        # Juntamos os chunks do VAD por canal até ~block_target_sec, ou quando o
+        # canal fica em silêncio por block_idle_sec (a pessoa parou de falar).
+        self._block_target_sec = 10.0
+        self._block_idle_sec   = 1.5
 
     # ── Ciclo de vida ──────────────────────────────────────────────────────────
 
@@ -133,39 +142,60 @@ class Transcriber:
 
     def _transcribe_loop(self) -> None:
         """
-        Consome a fila e transcreve cada chunk até stop_event + fila vazia.
+        Consome a fila acumulando áudio por canal em blocos maiores antes de
+        transcrever. Frases curtas isoladas transcrevem mal no Whisper (falta de
+        contexto); juntamos os chunks do VAD até ~block_target_sec, ou quando o
+        canal fica em silêncio por block_idle_sec.
 
-        Diarização e transcrição rodam em paralelo (M2): para cada chunk,
-        disparamos `identify` em outra thread enquanto o Whisper transcreve.
+        A diarização roda sobre o bloco inteiro (mais áudio = embedding melhor).
         """
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="diar") as pool:
-            while not self._stop_event.is_set() or not self._queue.empty():
+        accum: dict[str, dict] = {}  # channel -> {"chunks", "first_ts", "last_add"}
+
+        def flush(channel: str) -> None:
+            buf = accum.pop(channel, None)
+            if not buf or not buf["chunks"]:
+                return
+            audio = np.concatenate(buf["chunks"]).astype(np.float32)
+
+            speaker = None
+            if self.diarization is not None:
                 try:
-                    item = self._queue.get(timeout=0.5)
-                    timestamp, channel, speaker, audio = item
-                except queue.Empty:
-                    continue
-
-                try:
-                    speaker_future = None
-                    if speaker is None and self.diarization is not None:
-                        speaker_future = pool.submit(
-                            self.diarization.identify, audio, channel,
-                        )
-
-                    text = self._transcribe_chunk(audio)
-
-                    if speaker_future is not None:
-                        try:
-                            speaker = speaker_future.result(timeout=10.0)
-                        except Exception as exc:
-                            print(f"[Transcriber] diarização falhou: {exc}", flush=True)
-
-                    if text:
-                        self.on_result(timestamp, channel, speaker, text)
+                    speaker = self.diarization.identify(audio, channel)
                 except Exception as exc:
-                    if self.on_error:
-                        self.on_error(exc)
+                    print(f"[Transcriber] diarização falhou: {exc}", flush=True)
+
+            try:
+                text = self._transcribe_chunk(audio)
+            except Exception as exc:
+                if self.on_error:
+                    self.on_error(exc)
+                return
+
+            if text:
+                self.on_result(buf["first_ts"], channel, speaker, text)
+
+        while not self._stop_event.is_set() or not self._queue.empty() or accum:
+            try:
+                timestamp, channel, _spk, audio = self._queue.get(timeout=0.3)
+                buf = accum.get(channel)
+                if buf is None:
+                    buf = {"chunks": [], "first_ts": timestamp, "last_add": time.time()}
+                    accum[channel] = buf
+                buf["chunks"].append(audio)
+                buf["last_add"] = time.time()
+                if sum(len(c) for c in buf["chunks"]) / TARGET_SR >= self._block_target_sec:
+                    flush(channel)
+            except queue.Empty:
+                pass
+
+            # Flush por inatividade. Ao parar (fila já drenada), flush imediato
+            # para não perder o último trecho.
+            draining = self._stop_event.is_set() and self._queue.empty()
+            idle_limit = 0.0 if draining else self._block_idle_sec
+            now = time.time()
+            for channel in list(accum.keys()):
+                if now - accum[channel]["last_add"] >= idle_limit:
+                    flush(channel)
 
     def _transcribe_chunk(self, audio: np.ndarray) -> str:
         """
