@@ -2,7 +2,6 @@
 ui/settings_window.py — Janela de configurações de áudio usando customtkinter.
 """
 
-import json
 import threading
 import time
 import tkinter as tk
@@ -12,9 +11,7 @@ import numpy as np
 import sounddevice as sd
 
 from ui.widgets import COLORS, ActionButton
-from config import PROFILES_DIR
-
-SETTINGS_FILE = PROFILES_DIR / "settings.json"
+import settings
 
 
 def list_input_devices() -> list[dict]:
@@ -29,25 +26,6 @@ def list_input_devices() -> list[dict]:
                 "ch":    dev["max_input_channels"],
             })
     return devices
-
-
-def load_settings() -> dict:
-    """Carrega configurações salvas. Retorna dict vazio se não existir."""
-    if SETTINGS_FILE.exists():
-        try:
-            return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {}
-
-
-def save_settings(data: dict) -> None:
-    """Persiste configurações em disco."""
-    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
 
 
 class SettingsWindow(ctk.CTkToplevel):
@@ -70,12 +48,12 @@ class SettingsWindow(ctk.CTkToplevel):
         self.after(10, self.grab_set)
 
         # Carrega configurações salvas
-        saved = load_settings()
+        saved = settings.load()
 
-        self._saved_sis_idx   = saved.get("device_sistema", None)
-        self._saved_mic_idx   = saved.get("device_microfone", None)
-        self._saved_thresh_sis = saved.get("thresh_sistema",   0.00005)
-        self._saved_thresh_mic = saved.get("thresh_microfone", 0.00038)
+        self._saved_sis_idx    = saved.get("device_sistema")
+        self._saved_mic_idx    = saved.get("device_microfone")
+        self._saved_thresh_sis = saved.get("thresh_sistema")
+        self._saved_thresh_mic = saved.get("thresh_microfone")
 
         # Container principal com scroll para garantir que tudo apareça
         self.scroll_container = ctk.CTkScrollableFrame(
@@ -101,14 +79,8 @@ class SettingsWindow(ctk.CTkToplevel):
             text_color=SUB, font=("Segoe UI", 12), justify="center",
         ).pack(pady=(0, 20))
 
-        # ── Sistema ───────────────────────────────────────────────────────────
-        self._build_channel_section(
-            label="🔊 Áudio do Sistema",
-            color=COLORS["blue"],
-            attr_prefix="sis",
-            saved_idx=self._saved_sis_idx,
-            saved_thresh=self._saved_thresh_sis,
-        )
+        # ── Sistema (sempre automático: loopback, sem seleção de device) ──────
+        self._build_system_section(saved_thresh=self._saved_thresh_sis)
 
         ctk.CTkFrame(self.scroll_container, fg_color=COLORS["surface"], height=1).pack(fill="x", padx=30, pady=20)
 
@@ -120,6 +92,11 @@ class SettingsWindow(ctk.CTkToplevel):
             saved_idx=self._saved_mic_idx,
             saved_thresh=self._saved_thresh_mic,
         )
+
+        ctk.CTkFrame(self.scroll_container, fg_color=COLORS["surface"], height=1).pack(fill="x", padx=30, pady=20)
+
+        # ── Modelo Whisper ───────────────────────────────────────────────────
+        self._build_whisper_section()
 
         ctk.CTkFrame(self.scroll_container, fg_color=COLORS["surface"], height=1).pack(fill="x", padx=30, pady=20)
 
@@ -138,6 +115,108 @@ class SettingsWindow(ctk.CTkToplevel):
             color=COLORS["surface"], fg=FG,
             command=self._cancel,
         ).pack(side="left", padx=10)
+
+    # ── Seção Modelo Whisper ──────────────────────────────────────────────────
+
+    _WHISPER_MODELS = [
+        ("tiny",     "tiny     ·  75 MB · qualidade básica · CPU rápido"),
+        ("base",     "base     · 142 MB · qualidade ok · CPU rápido"),
+        ("small",    "small    · 466 MB · qualidade boa · CPU médio"),
+        ("medium",   "medium   · 1.5 GB · qualidade muito boa (recomendado)"),
+        ("large-v3", "large-v3 ·   3 GB · qualidade excelente · GPU recomendada"),
+    ]
+
+    def _build_whisper_section(self) -> None:
+        FG, SUB = COLORS["fg"], COLORS["subtext"]
+
+        frame = ctk.CTkFrame(self.scroll_container, fg_color="transparent")
+        frame.pack(fill="x", padx=30)
+
+        ctk.CTkLabel(
+            frame, text="🧠 Modelo de Transcrição (Whisper)",
+            text_color=COLORS["yellow"], font=("Segoe UI", 14, "bold"),
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            frame,
+            text=(
+                "Modelos maiores transcrevem melhor mas usam mais CPU/RAM.\n"
+                "Em CPU sem GPU, espere alguns segundos por frase.\n"
+                "Trocar dispara download na próxima inicialização."
+            ),
+            text_color=SUB, font=("Segoe UI", 10), justify="left",
+        ).pack(anchor="w", pady=(4, 8))
+
+        saved_model = settings.get("whisper_model") or "medium"
+        labels   = [lbl for _, lbl in self._WHISPER_MODELS]
+        by_label = {lbl: name for name, lbl in self._WHISPER_MODELS}
+        by_name  = {name: lbl for name, lbl in self._WHISPER_MODELS}
+
+        self._whisper_combo = ctk.CTkOptionMenu(
+            frame,
+            values=labels,
+            fg_color=COLORS["surface"],
+            button_color=COLORS["surface"],
+            button_hover_color=COLORS["panel"],
+            text_color=FG,
+            width=400,
+        )
+        self._whisper_combo.set(by_name.get(saved_model, by_name["medium"]))
+        self._whisper_combo.pack(anchor="w", pady=(4, 0))
+        self._whisper_label_to_name = by_label
+
+    def _build_system_section(self, saved_thresh: float) -> None:
+        """
+        Seção do áudio do sistema. NÃO há seleção de dispositivo: a captura é
+        sempre automática (loopback do que o usuário escuta). Mantém apenas o
+        threshold, que alimenta o medidor visual da tela principal.
+        """
+        FG, SUB = COLORS["fg"], COLORS["subtext"]
+        color = COLORS["blue"]
+
+        frame = ctk.CTkFrame(self.scroll_container, fg_color="transparent")
+        frame.pack(fill="x", padx=30)
+
+        ctk.CTkLabel(
+            frame, text="🔊 Áudio do Sistema (automático)",
+            text_color=color, font=("Segoe UI", 14, "bold"),
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            frame,
+            text=(
+                "Capturado automaticamente via loopback — o que sai pelos seus "
+                "fones/alto-falantes. Não há dispositivo para escolher."
+            ),
+            text_color=SUB, font=("Segoe UI", 10), justify="left", wraplength=480,
+        ).pack(anchor="w", pady=(4, 8))
+
+        thresh_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        thresh_frame.pack(fill="x", pady=(4, 0))
+
+        ctk.CTkLabel(
+            thresh_frame, text="Threshold do medidor:",
+            text_color=FG, font=("Segoe UI", 12),
+        ).pack(side="left")
+
+        thresh_label = ctk.CTkLabel(
+            thresh_frame, text=f"{saved_thresh:.5f}",
+            text_color=color, font=("Consolas", 12), width=80,
+        )
+        thresh_label.pack(side="right")
+
+        def on_slider(val):
+            thresh_label.configure(text=f"{float(val) / 10_000:.5f}")
+
+        slider = ctk.CTkSlider(
+            frame, from_=0.5, to=50, number_of_steps=99,
+            button_color=color, button_hover_color=self._adjust_color(color, 0.8),
+            progress_color=color, command=on_slider, width=400,
+        )
+        slider.set(saved_thresh * 10_000)
+        slider.pack(anchor="w", pady=(5, 0))
+
+        self._sis_slider = slider
 
     def _build_channel_section(
         self,
@@ -315,26 +394,41 @@ class SettingsWindow(ctk.CTkToplevel):
 
     def _apply(self) -> None:
         self._stop_prev.set()
-        
+
         def get_idx(p):
             s = getattr(self, f"_{p}_combo").get()
             return int(s.split("]")[0].replace("[", "").strip())
 
         try:
-            sis_idx = get_idx("sis")
+            sis_idx = None  # áudio do sistema é sempre automático (loopback)
             mic_idx = get_idx("mic")
             thresh_sis = self._sis_slider.get() / 10_000
             thresh_mic = self._mic_slider.get() / 10_000
 
-            save_settings({
+            chosen_label = self._whisper_combo.get()
+            chosen_model = self._whisper_label_to_name.get(chosen_label, "small")
+            previous_model = settings.get("whisper_model") or "small"
+
+            settings.save({
                 "device_sistema":    sis_idx,
                 "device_microfone":  mic_idx,
                 "thresh_sistema":    thresh_sis,
                 "thresh_microfone":  thresh_mic,
+                "whisper_model":     chosen_model,
             })
 
             if self.on_apply:
                 self.on_apply(sis_idx, mic_idx, thresh_sis, thresh_mic)
+
+            if chosen_model != previous_model:
+                from tkinter import messagebox
+                messagebox.showinfo(
+                    "Modelo alterado",
+                    f"Modelo trocado de '{previous_model}' para '{chosen_model}'.\n"
+                    "Reinicie o app para que o novo modelo seja carregado.",
+                    parent=self,
+                )
+
             self.destroy()
         except Exception as e:
             print(f"Erro ao salvar: {e}")

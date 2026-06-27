@@ -12,17 +12,16 @@ import sounddevice as sd
 
 from audio.resampler import resample, normalize_amplitude
 from ui.widgets import COLORS, ActionButton
-from ui.settings_window import load_settings
-from config import DEVICE_MICROFONE, TARGET_SR
+import settings
+from config import TARGET_SR
 
 # Duração da gravação de referência
 RECORD_SECONDS = 4
 
 
 def _get_mic_device() -> int:
-    """Retorna o índice do microfone: settings.json > config.py."""
-    saved = load_settings()
-    return saved.get("device_microfone", DEVICE_MICROFONE)
+    """Retorna o índice do microfone configurado."""
+    return settings.get("device_microfone")
 
 
 class ProfileWindow(ctk.CTkToplevel):
@@ -259,7 +258,7 @@ class ProfileWindow(ctk.CTkToplevel):
         self._recording = False
         self._level_canvas.delete("all")
         self._btn_record.configure(text=f"⏺  Gravar {RECORD_SECONDS}s de voz", fg_color=COLORS["accent"])
-        self._lbl_status.configure(text="Cancelado.", text_color=SUB)
+        self._lbl_status.configure(text="Cancelado.", text_color=COLORS["subtext"])
 
     def _on_record_error(self, error: str) -> None:
         self._recording = False

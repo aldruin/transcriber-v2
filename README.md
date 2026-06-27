@@ -8,30 +8,48 @@ O **Meeting Transcriber v2** é uma solução avançada de código aberto projet
 
 ## 📥 Download (Versão Pronta para Uso)
 
-Não é desenvolvedor? Você pode baixar o executável pronto para Windows e começar a usar agora mesmo, sem precisar instalar o Python.
+Baixe o binário do seu sistema operacional na [página de Releases](https://github.com/aldruin/transcriber-v2/releases):
 
-> [!TIP]
-> **[Baixar Meeting Transcriber v2 para Windows](https://github.com/aldruin/transcriber-v2/releases)**  
-> *(Nota: Ao rodar pela primeira vez, o Windows pode exibir um alerta de segurança por ser um executável não assinado. Clique em "Mais informações" > "Executar assim mesmo")*
+- **Windows** — `MeetingTranscriberV2-windows.exe`
+- **macOS**   — `MeetingTranscriberV2-macos.dmg` *(requer [BlackHole](https://github.com/ExistentialAudio/BlackHole) para áudio do sistema)*
+- **Linux**   — `MeetingTranscriberV2-linux.AppImage`
+
+> [!NOTE]
+> No Windows, o app captura o áudio do sistema **automaticamente via WASAPI loopback** — não é mais preciso ativar Stereo Mix. Binários não são assinados; libere no Gatekeeper (macOS) ou no SmartScreen (Windows) na 1ª execução.
 
 ---
 
 ## ✨ Destaques e Diferenciais
 
-- **Transcrição de Alta Performance**: Alimentado pelo `faster-whisper`, garantindo precisão superior e velocidade otimizada.
-- **Diarização Persistente (Assinatura de Voz)**: Identifica quem está falando. Uma vez que você nomeia um falante, o sistema o reconhece automaticamente em reuniões futuras.
-- **Processamento Assíncrono**: Arquitetura baseada em filas que elimina latência na interface e garante que a captura de áudio nunca seja interrompida.
-- **Interface Sofisticada**: UI moderna inspirada na paleta *Catppuccin*, com medidores de nível e visualização de ondas em tempo real.
+- **Transcrição de Alta Performance**: Alimentado pelo `faster-whisper` (default `small`, com seletor para `tiny`/`base`/`medium`/`large-v3` na UI). Detecta CUDA automaticamente.
+- **Diarização Persistente (Assinatura de Voz)**: Identifica quem está falando. O áudio do seu microfone é atribuído automaticamente ao seu perfil ("Eu" por default).
+- **Loopback Multiplataforma**: Captura áudio do sistema sem Stereo Mix no Windows (WASAPI), via monitor source no Linux e BlackHole no macOS.
+- **VAD com silero-vad**: detecção de fala neural sem calibração de threshold por hardware.
+- **Processamento Assíncrono**: filas com transcrição e diarização rodando em paralelo.
 
 ---
 
 ## 🛠️ Guia de Uso
 
-### 1. Configuração Inicial (Crucial)
-Antes de iniciar a transcrição, você precisa identificar os IDs dos seus dispositivos de áudio.
-1. Execute o script de diagnóstico: `python diagnostico.py` (ou abra as configurações na UI).
-2. Identifique o ID do seu **Microfone** e o ID do seu **Audio Loopback** (geralmente chamado de "Stereo Mix" ou similar).
-3. Configure esses IDs na janela de **Configurações** do aplicativo.
+### 📖 Guia de Configuração Inicial
+**Primeira vez?** Veja o [Guia Completo de Configuração](SETUP-GUIDE.md):
+- ✅ Áudio do sistema é **automático** (sem Stereo Mix)
+- ✅ Como escolher o microfone certo
+- ✅ Solução de problemas (troubleshooting)
+
+### 1. Primeira Execução
+Na primeira vez, um assistente rápido aparece. O **áudio do sistema é detectado
+automaticamente** (loopback do que você escuta) — você só escolhe o seu
+**microfone** e como quer ser identificado. Não é preciso ativar Stereo Mix nem
+rodar scripts. No macOS, instale o [BlackHole](https://github.com/ExistentialAudio/BlackHole)
+(único SO que ainda exige um passo manual).
+
+> [!IMPORTANT]
+> O áudio do sistema é capturado da **saída de áudio padrão** (fones,
+> alto-falantes…) — é dela que o app "ouve" o som. Por isso é preciso ter **um
+> dispositivo de saída ativo**; sem nenhuma saída, não há o que capturar. Você
+> não precisa estar ouvindo, mas o dispositivo precisa estar ligado. Se trocar
+> de saída durante a captura, é só **Parar → Iniciar** para o app redetectar.
 
 ### 2. Durante a Reunião
 - Clique em **▶ Iniciar** para começar a captura.
@@ -47,12 +65,44 @@ Esta é a parte mais poderosa:
 
 ---
 
+## 🧪 macOS e Linux — ajude a testar
+
+A captura no **Windows** está validada. Em **macOS e Linux** o caminho existe
+(monitor source no Linux, BlackHole no macOS), mas ainda precisa de validação em
+campo. Se você usa um desses sistemas, ajude o projeto a evoluir:
+
+1. Rode `python diagnostico.py` — ele mostra se a captura do áudio do sistema foi
+   detectada e, se falhar, o motivo específico do seu SO.
+2. Deu erro ou ficou estranho? **[Abra uma issue](https://github.com/aldruin/transcriber-v2/issues)**
+   colando o relatório completo do diagnóstico. É isso que nos permite corrigir
+   o suporte multiplataforma.
+
+---
+
 ## 🏗️ Para Desenvolvedores
 
 ### Instalação
 1. Clone o repositório: `git clone https://github.com/aldruin/transcriber-v2.git`
 2. Instale as dependências: `pip install -r requirements.txt`
 3. Execute: `python main.py`
+
+> 🩺 Problemas? Rode `python diagnostico.py` e cole o relatório completo ao
+> abrir uma issue — ele mostra SO, versões, GPU e a detecção de áudio do sistema.
+
+### ⚡ Aceleração por GPU (NVIDIA / CUDA)
+O app **detecta a GPU automaticamente** e usa CUDA quando disponível — sem
+configuração no código. O detalhe: a versão padrão do `torch` no PyPI é
+**CPU-only**, então mesmo com uma placa NVIDIA o Whisper roda na CPU (lento,
+sobretudo nos modelos `medium`/`large-v3`). Para habilitar a GPU:
+
+```bash
+pip uninstall -y torch torchaudio
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+```
+
+Confirme com `python diagnostico.py` (seção GPU / CUDA → deve dizer
+`CUDA disponivel: True`). O driver NVIDIA já costuma estar instalado; **não** é
+preciso instalar o CUDA Toolkit completo.
 
 ### Como Gerar o Executável (.EXE)
 Se você fez alterações no código e deseja gerar um novo executável para distribuir:

@@ -27,6 +27,7 @@ except ImportError:
         ProfileManager = profiles.ProfileManager
 
 from config import DIARIZATION_SIMILARITY_THRESHOLD
+import settings
 
 # Segundos de áudio acumulado por canal para contexto de embedding
 _CONTEXT_SECONDS = 3.0
@@ -80,6 +81,15 @@ class DiarizationEngine:
         key = self._channel_key(label)
         ctx_audio = self._push_audio(key, audio)
         embedding = extract_embedding(ctx_audio)
+
+        # Canal microfone = sempre o usuário (M3).
+        if "Microfone" in label:
+            user_name = settings.get("user_profile_name") or "Eu"
+            if embedding is not None:
+                self._profiles.update_user_profile(user_name, embedding)
+                self._last_speaker[key] = user_name
+                self._last_embedding[key] = embedding
+            return user_name
 
         if embedding is None:
             return self._last_speaker.get(key)

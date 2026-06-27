@@ -11,23 +11,37 @@ A transcrição roda em thread separada, consumindo de uma fila,
 para não bloquear a captura de áudio.
 """
 
+import time
 import queue
 import threading
 import numpy as np
-from datetime import datetime
 from faster_whisper import WhisperModel
 
 from audio.resampler import normalize_amplitude
-from diarization import DiarizationEngine  # <-- Adicionado
+from diarization import DiarizationEngine
 from config import (
-    WHISPER_MODEL,
-    WHISPER_LANGUAGE,
-    WHISPER_BEAM,
-    WHISPER_DEVICE,
-    WHISPER_COMPUTE,
     NO_SPEECH_THRESHOLD,
     AVG_LOGPROB_THRESHOLD,
+    TARGET_SR,
 )
+import settings
+
+
+def _detect_device() -> tuple[str, str]:
+    """
+    Detecta hardware disponível e devolve (device, compute_type) ótimos.
+
+    Ordem (D5):
+      1. CUDA → ("cuda", "float16")
+      2. fallback CPU → ("cpu", "int8")
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda", "float16"
+    except Exception:
+        pass
+    return "cpu", "int8"
 
 
 class Transcriber:
@@ -53,12 +67,18 @@ class Transcriber:
         self.on_result = on_result
         self.on_ready  = on_ready
         self.on_error  = on_error
-        self.diarization = diarization # <-- Adicionado
+        self.diarization = diarization
 
         self._model      : WhisperModel | None = None
         self._queue      : queue.Queue         = queue.Queue()
         self._stop_event : threading.Event     = threading.Event()
         self._worker     : threading.Thread | None = None
+
+        # O Whisper transcreve bem melhor com áudio contínuo (~10s) do que com
+        # frases curtas isoladas. Juntamos os chunks do VAD por canal até
+        # block_target_sec, ou após block_idle_sec de silêncio (fim da fala).
+        self._block_target_sec = 10.0
+        self._block_idle_sec   = 1.5
 
     # ── Ciclo de vida ──────────────────────────────────────────────────────────
 
@@ -68,10 +88,18 @@ class Transcriber:
 
     def _load_model(self) -> None:
         try:
+            cfg = settings.load()
+            model_name = cfg.get("whisper_model") or "small"
+            device, compute = _detect_device()
+            print(
+                f"[Whisper] carregando '{model_name}' "
+                f"(device={device}, compute={compute})...",
+                flush=True,
+            )
             self._model = WhisperModel(
-                WHISPER_MODEL,
-                device=WHISPER_DEVICE,
-                compute_type=WHISPER_COMPUTE,
+                model_name,
+                device=device,
+                compute_type=compute,
             )
             if self.on_ready:
                 self.on_ready()
@@ -111,27 +139,61 @@ class Transcriber:
     # ── Loop interno ──────────────────────────────────────────────────────────
 
     def _transcribe_loop(self) -> None:
-        """Consome a fila e transcreve cada chunk até stop_event + fila vazia."""
-        while not self._stop_event.is_set() or not self._queue.empty():
-            try:
-                # Fila contém: (timestamp, channel, speaker, audio)
-                item = self._queue.get(timeout=0.5)
-                timestamp, channel, speaker, audio = item
-            except queue.Empty:
-                continue
+        """
+        Consome a fila acumulando áudio por canal em blocos maiores antes de
+        transcrever. Frases curtas isoladas transcrevem mal no Whisper (falta de
+        contexto); juntamos os chunks do VAD até ~block_target_sec, ou quando o
+        canal fica em silêncio por block_idle_sec.
+
+        A diarização roda sobre o bloco inteiro (mais áudio = embedding melhor).
+        """
+        accum: dict[str, dict] = {}  # channel -> {"chunks", "first_ts", "last_add"}
+
+        def flush(channel: str) -> None:
+            buf = accum.pop(channel, None)
+            if not buf or not buf["chunks"]:
+                return
+            audio = np.concatenate(buf["chunks"]).astype(np.float32)
+
+            speaker = None
+            if self.diarization is not None:
+                try:
+                    speaker = self.diarization.identify(audio, channel)
+                except Exception as exc:
+                    print(f"[Transcriber] diarização falhou: {exc}", flush=True)
 
             try:
-                # Se o falante não foi identificado no envio (comum agora),
-                # fazemos a diarização aqui, na thread de transcrição.
-                if speaker is None and self.diarization:
-                    speaker = self.diarization.identify(audio, label=channel)
-
                 text = self._transcribe_chunk(audio)
-                if text:
-                    self.on_result(timestamp, channel, speaker, text)
             except Exception as exc:
                 if self.on_error:
                     self.on_error(exc)
+                return
+
+            if text:
+                self.on_result(buf["first_ts"], channel, speaker, text)
+
+        while not self._stop_event.is_set() or not self._queue.empty() or accum:
+            try:
+                timestamp, channel, _spk, audio = self._queue.get(timeout=0.3)
+                buf = accum.get(channel)
+                if buf is None:
+                    buf = {"chunks": [], "first_ts": timestamp, "last_add": time.time()}
+                    accum[channel] = buf
+                buf["chunks"].append(audio)
+                buf["last_add"] = time.time()
+                if sum(len(c) for c in buf["chunks"]) / TARGET_SR >= self._block_target_sec:
+                    flush(channel)
+            except queue.Empty:
+                pass
+
+            # Flush por inatividade. Ao parar (fila já drenada), flush imediato
+            # para não perder o último trecho.
+            draining = self._stop_event.is_set() and self._queue.empty()
+            idle_limit = 0.0 if draining else self._block_idle_sec
+            now = time.time()
+            for channel in list(accum.keys()):
+                if now - accum[channel]["last_add"] >= idle_limit:
+                    flush(channel)
 
     def _transcribe_chunk(self, audio: np.ndarray) -> str:
         """
@@ -143,16 +205,14 @@ class Transcriber:
         # 1. Normaliza amplitude para resolver voz baixa
         audio = normalize_amplitude(audio)
 
-        # 2. Transcreve com Whisper
+        # 2. Transcreve com Whisper. VAD é feito a montante (silero, em
+        # `audio/capture.py`); aqui desligamos o VAD do Whisper (D3).
+        cfg = settings.load()
         segments, _ = self._model.transcribe(
             audio,
-            language=WHISPER_LANGUAGE,
-            beam_size=WHISPER_BEAM,
-            vad_filter=True,
-            vad_parameters=dict(
-                min_silence_duration_ms=200,
-                speech_pad_ms=100,
-            ),
+            language=cfg.get("whisper_language") or "pt",
+            beam_size=int(cfg.get("whisper_beam") or 5),
+            vad_filter=False,
             condition_on_previous_text=False,
         )
 

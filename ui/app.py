@@ -17,31 +17,27 @@ import customtkinter as ctk
 import numpy as np
 
 from audio.capture             import VoiceCapture
+from audio                      import loopback
+from audio.echo_guard           import EchoGuard
 from transcription.transcriber import Transcriber
+from transcription.curation    import build_curation_prompt
 from diarization                import DiarizationEngine
 from ui.widgets                 import COLORS, LevelMeter, ActionButton, StatusLabel, WaveformCanvas
 from ui.profile_window          import ProfileWindow
-from ui.settings_window         import SettingsWindow, load_settings
-from config import (
-    DEVICE_SISTEMA,
-    DEVICE_MICROFONE,
-    VAD_THRESHOLD_SISTEMA,
-    VAD_THRESHOLD_MICROFONE,
-    OUTPUT_DIR,
-)
+from ui.settings_window         import SettingsWindow
+from ui.setup_wizard            import SetupWizard
+from config import OUTPUT_DIR
+import settings
 
 
 def _load_runtime_settings() -> dict:
-    """
-    Retorna as configurações de dispositivo/threshold em uso.
-    Prioridade: settings.json salvo pelo usuário > config.py.
-    """
-    saved = load_settings()
+    """Atalho fino para `settings.load()` filtrando só o que o app usa."""
+    saved = settings.load()
     return {
-        "device_sistema":   saved.get("device_sistema",   DEVICE_SISTEMA),
-        "device_microfone": saved.get("device_microfone", DEVICE_MICROFONE),
-        "thresh_sistema":   saved.get("thresh_sistema",   VAD_THRESHOLD_SISTEMA),
-        "thresh_microfone": saved.get("thresh_microfone", VAD_THRESHOLD_MICROFONE),
+        "device_sistema":   saved["device_sistema"],
+        "device_microfone": saved["device_microfone"],
+        "thresh_sistema":   saved["thresh_sistema"],
+        "thresh_microfone": saved["thresh_microfone"],
     }
 
 
@@ -52,7 +48,7 @@ class TranscriberApp(ctk.CTk):
 
     def __init__(self):
         super().__init__()
-        
+
         self.title("Meeting Transcriber v2")
         self.geometry("1000x750")
         self.configure(fg_color=COLORS["bg"])
@@ -68,10 +64,16 @@ class TranscriberApp(ctk.CTk):
         # "Falante_1" -> "João"
         self._speaker_map = {}
 
+        # Entradas estruturadas da transcrição da sessão (para o prompt de
+        # curadoria). Guardamos o falante ORIGINAL e aplicamos o _speaker_map
+        # no momento de copiar, refletindo renomeações feitas depois.
+        self._transcript_entries: list[tuple[str, str, str | None, str]] = []
+
         # Configurações em runtime (dispositivos + thresholds)
         self._cfg = _load_runtime_settings()
 
         # Módulos
+        self._echo_guard = EchoGuard(window_s=0.5)
         self._diarization = DiarizationEngine()
         self._transcriber = Transcriber(
             on_result=self._on_transcription,
@@ -81,8 +83,33 @@ class TranscriberApp(ctk.CTk):
         )
 
         self._build_ui()
+        self._announce_model_load()
         self._transcriber.load_async()
         self._tick_meters()
+
+    def _announce_model_load(self) -> None:
+        """Mostra status apropriado: download na 1ª vez, carregamento depois."""
+        from pathlib import Path
+        model_name = settings.get("whisper_model") or "medium"
+        cache_root = Path.home() / ".cache" / "huggingface" / "hub"
+        cached = any(
+            cache_root.glob(f"models--*whisper*{model_name}*")
+        ) if cache_root.exists() else False
+
+        if cached:
+            self._status_label.working(f"Carregando modelo '{model_name}'")
+            self._append_info(f"Carregando modelo Whisper '{model_name}'...")
+        else:
+            self._status_label.working(f"Baixando modelo '{model_name}'")
+            self._append_info(
+                f"Primeiro uso do modelo '{model_name}' — baixando "
+                "(pode levar alguns minutos na primeira vez)."
+            )
+
+        self._append_info(
+            "Em CPU, cada frase leva alguns segundos para aparecer. "
+            "Falas longas são quebradas em pedaços (~4s) durante a transcrição."
+        )
 
     def run(self):
         self.mainloop()
@@ -150,6 +177,12 @@ class TranscriberApp(ctk.CTk):
             self.sidebar, text="👤  Perfis de Voz",
             color=COLORS["surface"], fg=FG,
             command=self._open_profiles,
+        ).pack(padx=20, pady=5, fill="x")
+
+        ActionButton(
+            self.sidebar, text="📋  Copiar p/ curadoria",
+            color=COLORS["surface"], fg=FG,
+            command=self._copy_curation,
         ).pack(padx=20, pady=5, fill="x")
 
         self.sidebar_spacer = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -247,11 +280,10 @@ class TranscriberApp(ctk.CTk):
     def _devices_info(self) -> str:
         import sounddevice as sd
         try:
-            sis = sd.query_devices(self._cfg["device_sistema"])["name"]
             mic = sd.query_devices(self._cfg["device_microfone"])["name"]
-            return f"🔊 {sis[:25]}...  |  🎤 {mic[:25]}..."
+            return f"🔊 Sistema: automático  |  🎤 {mic[:30]}"
         except Exception:
-            return "Dispositivos não configurados"
+            return "🔊 Sistema: automático  |  🎤 microfone não configurado"
 
     # ── Medidores e Waveform ──────────────────────────────────────────────────
 
@@ -281,6 +313,7 @@ class TranscriberApp(ctk.CTk):
         self._running  = True
         self._stop_evt = threading.Event()
         self._speaker_map = {} # Reseta mapa de renomeação na sessão
+        self._transcript_entries = []  # Reseta histórico p/ curadoria
 
         # Reinicia sessão de diarização (Falante_1, Falante_2... do zero)
         self._diarization.reset_session()
@@ -307,29 +340,64 @@ class TranscriberApp(ctk.CTk):
         # Inicia transcrição
         self._transcriber.start()
 
-        # Captura sistema
+        # Captura sistema — loopback automático (D1) ou device manual se o
+        # usuário sobrescreveu em settings.json.
+        sistema_kwargs = self._build_sistema_kwargs()
+        if sistema_kwargs is None:
+            return  # erro já reportado na UI
+
         cap_sistema = VoiceCapture(
-            device_idx=self._cfg["device_sistema"],
             label="🔊 Sistema",
-            energy_threshold=self._cfg["thresh_sistema"],
             on_chunk=self._on_audio_chunk,
             stop_event=self._stop_evt,
             on_level=self.on_level,
+            echo_guard=self._echo_guard,
+            **sistema_kwargs,
         )
 
         # Captura microfone
         cap_microfone = VoiceCapture(
             device_idx=self._cfg["device_microfone"],
             label="🎤 Microfone",
-            energy_threshold=self._cfg["thresh_microfone"],
             on_chunk=self._on_audio_chunk,
             stop_event=self._stop_evt,
             on_level=self.on_level,
             enabled_fn=lambda: self._mic_on,
+            echo_guard=self._echo_guard,
         )
 
         threading.Thread(target=cap_sistema.run,   daemon=True).start()
         threading.Thread(target=cap_microfone.run, daemon=True).start()
+
+    def _build_sistema_kwargs(self) -> dict | None:
+        """
+        Constrói os kwargs do VoiceCapture para o canal "Sistema".
+
+        O áudio do sistema é SEMPRE automático (loopback do que o usuário
+        escuta). Não há mais seleção manual de dispositivo — qualquer
+        `device_sistema` legado salvo em settings é ignorado de propósito.
+        """
+        try:
+            lb = loopback.detect_system_audio()
+        except loopback.LoopbackError as exc:
+            self._append(
+                f"❌ Captura do sistema indisponível: {exc}\n", "erro",
+            )
+            self._running = False
+            self._btn_start.set_active()
+            self._btn_stop.set_inactive()
+            self._btn_pause.set_inactive(text="⏸  Pausar")
+            self._btn_mic.set_inactive()
+            return None
+
+        self._append_info(f"🔊 {lb.label}")
+        return dict(
+            device_idx=lb.device,
+            channels=lb.channels,
+            samplerate=lb.samplerate,
+            extra_settings=lb.extra_settings,
+            soundcard_mic=lb.soundcard_mic,
+        )
 
     def stop(self) -> None:
         if not self._running:
@@ -396,6 +464,39 @@ class TranscriberApp(ctk.CTk):
     def _open_profiles(self) -> None:
         ProfileWindow(self, self._diarization)
 
+    def _copy_curation(self) -> None:
+        """
+        Monta um prompt de curadoria com a transcrição da sessão e copia para a
+        área de transferência, pronto para colar no LLM do usuário (Claude/GPT).
+        Não chama nenhuma API — só gera o texto.
+        """
+        if not self._transcript_entries:
+            self._append_info(
+                "Nada para copiar ainda — inicie e gere alguma transcrição primeiro."
+            )
+            return
+
+        lines = []
+        for ts, channel, speaker, text in self._transcript_entries:
+            display = self._speaker_map.get(speaker, speaker) if speaker else None
+            spk_str = f" [{display}]" if display else ""
+            lines.append(f"[{ts}] {channel}{spk_str}: {text}")
+
+        prompt = build_curation_prompt("\n".join(lines))
+
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(prompt)
+            self.update()  # garante que o conteúdo persista no clipboard
+            self._append_info(
+                "📋 Prompt de curadoria copiado! Cole no seu LLM (Claude/GPT) e "
+                "preencha o [contexto da conversa]."
+            )
+        except Exception as exc:
+            self._append(
+                f"Erro ao copiar para a área de transferência: {exc}\n", "erro"
+            )
+
     def _quit(self) -> None:
         self.stop()
         self.after(300, self.destroy)
@@ -405,9 +506,19 @@ class TranscriberApp(ctk.CTk):
     def _on_audio_chunk(self, audio: np.ndarray, timestamp: float, label: str) -> None:
         if self._paused:
             return
-            
-        # Envia o áudio direto para a fila. A diarização agora será feita 
-        # dentro da thread do Transcriber para não bloquear a captura nem a UI.
+
+        # EchoGuard: sistema marca atividade; microfone descarta se eco recente.
+        is_system = "Sistema" in label
+        if is_system:
+            self._echo_guard.mark_system_active()
+        else:
+            if self._echo_guard.should_drop_mic():
+                count = self._echo_guard.record_drop()
+                # Log silencioso a cada 5 descartes pra não poluir UI.
+                if count % 5 == 1:
+                    print(f"[EchoGuard] mic chunk descartado (provável eco) — total {count}", flush=True)
+                return
+
         self._transcriber.enqueue(audio, timestamp, label)
 
     def _on_transcription(self, timestamp: float, channel: str, speaker: str | None, text: str) -> None:
@@ -452,6 +563,10 @@ class TranscriberApp(ctk.CTk):
         self._txt.insert("end", f": {text}\n")
         self._txt.see("end")
         self._txt.configure(state="disabled")
+
+        # Guarda entrada estruturada para a curadoria (falante ORIGINAL; o nome
+        # de exibição é resolvido na hora de copiar, refletindo renomeações).
+        self._transcript_entries.append((ts, channel, speaker, text))
 
         # Salva no arquivo
         if self._file:

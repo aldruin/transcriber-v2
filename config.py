@@ -1,8 +1,11 @@
 """
-config.py — Configurações centralizadas do Meeting Transcriber.
+config.py — Defaults de fábrica do Meeting Transcriber.
 
-Todas as constantes ajustáveis ficam aqui.
-Altere este arquivo para calibrar o comportamento sem tocar na lógica.
+Este módulo só guarda VALORES IMUTÁVEIS. A configuração efetiva em runtime
+mora em `settings.py` (lê/grava `~/.meeting_transcriber/settings.json`).
+
+Para alterar comportamento sem reinstalar, mexa nas configurações pela UI.
+Mexer aqui só altera o que vem "de fábrica" para usuários novos.
 """
 
 import sys
@@ -19,11 +22,11 @@ def get_base_path():
 BASE_DIR = get_base_path()
 
 # ── Modelo Whisper ─────────────────────────────────────────────────────────────
-WHISPER_MODEL    = "medium"   # small | medium | large-v3
+# `device` e `compute_type` são detectados em runtime pelo `transcriber.py`
+# (CUDA → float16; CPU → int8). Aqui ficam apenas valores informativos.
+WHISPER_MODEL    = "medium"   # tiny | base | small | medium | large-v3
 WHISPER_LANGUAGE = "pt"       # None = detecção automática | "pt" | "en"
-WHISPER_BEAM     = 10         # candidatos por passo (maior = melhor, mais lento)
-WHISPER_DEVICE   = "cpu"      # "cpu" | "cuda"
-WHISPER_COMPUTE  = "int8"     # "int8" (cpu) | "float16" (gpu)
+WHISPER_BEAM     = 5          # candidatos por passo (maior = melhor, mais lento)
 
 # ── Filtros anti-alucinação ────────────────────────────────────────────────────
 # Segmentos com probabilidade de silêncio acima deste valor são descartados
@@ -31,27 +34,20 @@ NO_SPEECH_THRESHOLD  = 0.60
 # Segmentos com log-prob médio abaixo deste valor são descartados (muito incertos)
 AVG_LOGPROB_THRESHOLD = -1.0
 
-# ── VAD (Voice Activity Detection) ────────────────────────────────────────────
-# Thresholds de energia RMS por canal — ajuste se o microfone for muito fraco/forte
-VAD_THRESHOLD_SISTEMA   = 0.00005  # canal de áudio do sistema (calibrado via diagnostico.py)
-VAD_THRESHOLD_MICROFONE = 0.00038  # microfone (calibrado via diagnostico.py)
-
-VAD_SILENCE_MS    = 800    # ms de silêncio para fechar um chunk de fala
-VAD_MIN_SPEECH_MS = 250    # duração mínima de fala para não descartar o chunk
-VAD_MAX_SPEECH_MS = 15000  # duração máxima antes de forçar flush
-
-# ── Dispositivos de áudio ──────────────────────────────────────────────────────
-# Use: python diagnostico.py para descobrir os índices corretos
-# Loopback/mixagem estéreo: tente 7, 12 ou 20 se um deles não funcionar
-DEVICE_SISTEMA   = 20   # Mixagem estéreo (Realtek HD Audio Stereo input) — 48kHz
-DEVICE_MICROFONE = 16   # Microfone (Realtek HD Audio Mic input) — 44100Hz
+# ── VAD (silero-vad faz a decisão) ────────────────────────────────────────────
+# Estes valores existem só para o medidor visual da UI mostrar uma referência
+# de "abaixo disso não está pegando som". Não dirigem mais o VAD.
+VAD_THRESHOLD_SISTEMA   = 0.00005
+VAD_THRESHOLD_MICROFONE = 0.00038
 
 # ── Áudio interno ─────────────────────────────────────────────────────────────
 TARGET_SR = 16_000   # sample rate esperado pelo Whisper (não altere)
 
 # ── Diarização ────────────────────────────────────────────────────────────────
-# Similaridade mínima (cosine) para considerar dois chunks do mesmo falante
-DIARIZATION_SIMILARITY_THRESHOLD = 0.75
+# Similaridade mínima (cosine) para dois trechos serem o MESMO falante. Calibrado
+# empiricamente: a mesma pessoa fica em ~0.60–0.94, pessoas diferentes abaixo de
+# ~0.50; 0.75 (antigo) super-segmentava. Reajuste via tools/calibrar_diarizacao.py.
+DIARIZATION_SIMILARITY_THRESHOLD = 0.60
 # Número máximo de falantes distintos esperados por sessão
 DIARIZATION_MAX_SPEAKERS = 8
 
